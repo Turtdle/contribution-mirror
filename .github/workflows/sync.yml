@@ -2,7 +2,7 @@ name: Sync Bitbucket Contributions
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # daily at 6am UTC
+    - cron: '0 6 * * *'
   workflow_dispatch: {}
 
 jobs:
@@ -15,29 +15,31 @@ jobs:
 
       - name: Get existing commit dates
         run: |
-          git log --format='%ai' | cut -d' ' -f1,2 | sort -u > /tmp/existing_dates.txt
+          git log --format='%aI' | sort -u > /tmp/existing_dates.txt
           echo "Existing commits: $(wc -l < /tmp/existing_dates.txt)"
 
       - name: Fetch Bitbucket commits
         env:
           BB_AUTH: ${{ secrets.BB_AUTH }}
         run: |
+          set +e
+
           # Get all repo slugs
           > /tmp/all_repos.txt
           PAGE=1
           while true; do
-            RESPONSE=$(curl -sf -u "$BB_AUTH" "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
+            RESPONSE=$(curl -s -u "$BB_AUTH" "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
             echo "$RESPONSE" | python3 -c "
           import sys, json
           data = json.loads(sys.stdin.read(), strict=False)
           for r in data.get('values', []):
               print(r['slug'])
-          " >> /tmp/all_repos.txt
+          " >> /tmp/all_repos.txt 2>/dev/null
             HAS_NEXT=$(echo "$RESPONSE" | python3 -c "
           import sys, json
           data = json.loads(sys.stdin.read(), strict=False)
           print('yes' if data.get('next') else 'no')
-          ")
+          " 2>/dev/null)
             [ "$HAS_NEXT" != "yes" ] && break
             PAGE=$((PAGE + 1))
           done
@@ -49,53 +51,59 @@ jobs:
             PAGE=1
             FOUND=0
             while true; do
-              DATES=$(curl -sf -u "$BB_AUTH" \
-                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null \
-                | python3 -c "
+              RESPONSE=$(curl -s -u "$BB_AUTH" \
+                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null)
+              PARSED=$(echo "$RESPONSE" | python3 -c "
           import sys, json
           try:
               data = json.loads(sys.stdin.read(), strict=False)
               vals = data.get('values', [])
-              if not vals: sys.exit(1)
+              if not vals:
+                  print('EMPTY')
+                  sys.exit(0)
+              has_next = 'yes' if data.get('next') else 'no'
+              dates = []
               for c in vals:
                   raw = c.get('author', {}).get('raw', '')
                   if 'Samuel Wan' in raw or 'sam.wan' in raw:
-                      print(c['date'])
-          except: sys.exit(1)
+                      dates.append(c['date'])
+              if dates:
+                  for d in dates:
+                      print(d)
+              print('NEXT:' + has_next)
+          except:
+              print('EMPTY')
           " 2>/dev/null)
-              RC=$?
-              [ $RC -ne 0 ] && [ $FOUND -eq 0 ] && break
+
+              if echo "$PARSED" | grep -q "^EMPTY$"; then
+                break
+              fi
+
+              DATES=$(echo "$PARSED" | grep -v "^NEXT:")
               if [ -n "$DATES" ]; then
                 echo "$DATES" >> /tmp/bb_dates.txt
                 NEW=$(echo "$DATES" | wc -l | tr -d ' ')
                 FOUND=$((FOUND + NEW))
               fi
-              HAS_NEXT=$(curl -sf -u "$BB_AUTH" \
-                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null \
-                | python3 -c "
-          import sys, json
-          try:
-              data = json.loads(sys.stdin.read(), strict=False)
-              print('yes' if data.get('next') else 'no')
-          except: print('no')
-          " 2>/dev/null)
+
+              HAS_NEXT=$(echo "$PARSED" | grep "^NEXT:" | cut -d: -f2)
               [ "$HAS_NEXT" != "yes" ] && break
               PAGE=$((PAGE + 1))
             done
+            [ $FOUND -gt 0 ] && echo "$REPO: $FOUND commits"
           done < /tmp/all_repos.txt
           echo "Total Bitbucket commits: $(wc -l < /tmp/bb_dates.txt)"
 
       - name: Create new commits
         run: |
+          set +e
           git config user.name "Turtdle"
           git config user.email "47124703+Turtdle@users.noreply.github.com"
 
-          # Find dates not already in the repo
           NEW_COUNT=0
           sort -u /tmp/bb_dates.txt | while IFS= read -r DATE; do
             [ -z "$DATE" ] && continue
-            SHORT=$(echo "$DATE" | cut -dT -f1,2 | tr T ' ' | cut -d'+' -f1)
-            if ! grep -q "$SHORT" /tmp/existing_dates.txt 2>/dev/null; then
+            if ! grep -qF "$DATE" /tmp/existing_dates.txt 2>/dev/null; then
               GIT_AUTHOR_DATE="$DATE" GIT_COMMITTER_DATE="$DATE" \
                 git commit --allow-empty -m "work" --quiet
               NEW_COUNT=$((NEW_COUNT + 1))
