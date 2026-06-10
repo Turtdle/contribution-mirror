@@ -1,0 +1,114 @@
+name: Sync Bitbucket Contributions
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # daily at 6am UTC
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get existing commit dates
+        run: |
+          git log --format='%ai' | cut -d' ' -f1,2 | sort -u > /tmp/existing_dates.txt
+          echo "Existing commits: $(wc -l < /tmp/existing_dates.txt)"
+
+      - name: Fetch Bitbucket commits
+        env:
+          BB_AUTH: ${{ secrets.BB_AUTH }}
+        run: |
+          # Get all repo slugs
+          > /tmp/all_repos.txt
+          PAGE=1
+          while true; do
+            RESPONSE=$(curl -sf -u "$BB_AUTH" "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
+            echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read(), strict=False)
+          for r in data.get('values', []):
+              print(r['slug'])
+          " >> /tmp/all_repos.txt
+            HAS_NEXT=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read(), strict=False)
+          print('yes' if data.get('next') else 'no')
+          ")
+            [ "$HAS_NEXT" != "yes" ] && break
+            PAGE=$((PAGE + 1))
+          done
+          echo "Found $(wc -l < /tmp/all_repos.txt) repos"
+
+          # Scan each repo for Samuel Wan commits
+          > /tmp/bb_dates.txt
+          while IFS= read -r REPO; do
+            PAGE=1
+            FOUND=0
+            while true; do
+              DATES=$(curl -sf -u "$BB_AUTH" \
+                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null \
+                | python3 -c "
+          import sys, json
+          try:
+              data = json.loads(sys.stdin.read(), strict=False)
+              vals = data.get('values', [])
+              if not vals: sys.exit(1)
+              for c in vals:
+                  raw = c.get('author', {}).get('raw', '')
+                  if 'Samuel Wan' in raw or 'sam.wan' in raw:
+                      print(c['date'])
+          except: sys.exit(1)
+          " 2>/dev/null)
+              RC=$?
+              [ $RC -ne 0 ] && [ $FOUND -eq 0 ] && break
+              if [ -n "$DATES" ]; then
+                echo "$DATES" >> /tmp/bb_dates.txt
+                NEW=$(echo "$DATES" | wc -l | tr -d ' ')
+                FOUND=$((FOUND + NEW))
+              fi
+              HAS_NEXT=$(curl -sf -u "$BB_AUTH" \
+                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null \
+                | python3 -c "
+          import sys, json
+          try:
+              data = json.loads(sys.stdin.read(), strict=False)
+              print('yes' if data.get('next') else 'no')
+          except: print('no')
+          " 2>/dev/null)
+              [ "$HAS_NEXT" != "yes" ] && break
+              PAGE=$((PAGE + 1))
+            done
+          done < /tmp/all_repos.txt
+          echo "Total Bitbucket commits: $(wc -l < /tmp/bb_dates.txt)"
+
+      - name: Create new commits
+        run: |
+          git config user.name "Turtdle"
+          git config user.email "47124703+Turtdle@users.noreply.github.com"
+
+          # Find dates not already in the repo
+          NEW_COUNT=0
+          sort -u /tmp/bb_dates.txt | while IFS= read -r DATE; do
+            [ -z "$DATE" ] && continue
+            SHORT=$(echo "$DATE" | cut -dT -f1,2 | tr T ' ' | cut -d'+' -f1)
+            if ! grep -q "$SHORT" /tmp/existing_dates.txt 2>/dev/null; then
+              GIT_AUTHOR_DATE="$DATE" GIT_COMMITTER_DATE="$DATE" \
+                git commit --allow-empty -m "work" --quiet
+              NEW_COUNT=$((NEW_COUNT + 1))
+            fi
+          done
+          echo "New commits added: $NEW_COUNT"
+
+      - name: Push
+        run: |
+          AHEAD=$(git rev-list origin/main..HEAD | wc -l | tr -d ' ')
+          if [ "$AHEAD" -gt 0 ]; then
+            git push origin main
+            echo "Pushed $AHEAD new commits"
+          else
+            echo "No new commits to push"
+          fi
