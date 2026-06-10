@@ -24,53 +24,70 @@ jobs:
         run: |
           set +e
 
+          # Debug: test API connectivity
+          HTTP_CODE=$(curl -s -o /tmp/bb_test.json -w "%{http_code}" -u "$BB_AUTH" "https://api.bitbucket.org/2.0/user")
+          echo "API test status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "API auth failed. Response:"
+            cat /tmp/bb_test.json
+            exit 1
+          fi
+
           # Get all repo slugs
           > /tmp/all_repos.txt
           PAGE=1
           while true; do
-            RESPONSE=$(curl -s -u "$BB_AUTH" "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
-            echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read(), strict=False)
+            HTTP_CODE=$(curl -s -o /tmp/bb_page.json -w "%{http_code}" -u "$BB_AUTH" \
+              "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Repo list page $PAGE failed with HTTP $HTTP_CODE"
+              break
+            fi
+            python3 -c "
+          import json
+          with open('/tmp/bb_page.json') as f:
+              data = json.loads(f.read(), strict=False)
           for r in data.get('values', []):
               print(r['slug'])
           " >> /tmp/all_repos.txt 2>/dev/null
-            HAS_NEXT=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read(), strict=False)
+            HAS_NEXT=$(python3 -c "
+          import json
+          with open('/tmp/bb_page.json') as f:
+              data = json.loads(f.read(), strict=False)
           print('yes' if data.get('next') else 'no')
           " 2>/dev/null)
             [ "$HAS_NEXT" != "yes" ] && break
             PAGE=$((PAGE + 1))
           done
-          echo "Found $(wc -l < /tmp/all_repos.txt) repos"
+          echo "Found $(wc -l < /tmp/all_repos.txt) repos across $PAGE pages"
 
           # Scan each repo for Samuel Wan commits
           > /tmp/bb_dates.txt
+          REPO_NUM=0
           while IFS= read -r REPO; do
+            REPO_NUM=$((REPO_NUM + 1))
             PAGE=1
             FOUND=0
             while true; do
-              RESPONSE=$(curl -s -u "$BB_AUTH" \
+              HTTP_CODE=$(curl -s -o /tmp/bb_commits.json -w "%{http_code}" -u "$BB_AUTH" \
                 "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null)
-              PARSED=$(echo "$RESPONSE" | python3 -c "
-          import sys, json
+              [ "$HTTP_CODE" != "200" ] && break
+
+              PARSED=$(python3 -c "
+          import json
           try:
-              data = json.loads(sys.stdin.read(), strict=False)
+              with open('/tmp/bb_commits.json') as f:
+                  data = json.loads(f.read(), strict=False)
               vals = data.get('values', [])
               if not vals:
                   print('EMPTY')
-                  sys.exit(0)
-              has_next = 'yes' if data.get('next') else 'no'
-              dates = []
-              for c in vals:
-                  raw = c.get('author', {}).get('raw', '')
-                  if 'Samuel Wan' in raw or 'sam.wan' in raw:
-                      dates.append(c['date'])
-              if dates:
-                  for d in dates:
-                      print(d)
-              print('NEXT:' + has_next)
+              else:
+                  has_next = 'yes' if data.get('next') else 'no'
+                  for c in vals:
+                      raw = c.get('author', {}).get('raw', '')
+                      if 'Samuel Wan' in raw or 'sam.wan' in raw:
+                          print(c['date'])
+                  print('NEXT:' + has_next)
           except:
               print('EMPTY')
           " 2>/dev/null)
@@ -79,7 +96,7 @@ jobs:
                 break
               fi
 
-              DATES=$(echo "$PARSED" | grep -v "^NEXT:")
+              DATES=$(echo "$PARSED" | grep -v "^NEXT:" | grep -v "^$")
               if [ -n "$DATES" ]; then
                 echo "$DATES" >> /tmp/bb_dates.txt
                 NEW=$(echo "$DATES" | wc -l | tr -d ' ')
@@ -91,6 +108,7 @@ jobs:
               PAGE=$((PAGE + 1))
             done
             [ $FOUND -gt 0 ] && echo "$REPO: $FOUND commits"
+            [ $((REPO_NUM % 50)) -eq 0 ] && echo "Progress: $REPO_NUM repos scanned..."
           done < /tmp/all_repos.txt
           echo "Total Bitbucket commits: $(wc -l < /tmp/bb_dates.txt)"
 
