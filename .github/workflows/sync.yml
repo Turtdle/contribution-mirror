@@ -20,12 +20,12 @@ jobs:
 
       - name: Fetch Bitbucket commits
         env:
-          BB_AUTH: ${{ secrets.BB_AUTH }}
+          BB_AUTH_B64: ${{ secrets.BB_AUTH_B64 }}
         run: |
           set +e
 
           # Debug: test API connectivity
-          HTTP_CODE=$(curl -s -o /tmp/bb_test.json -w "%{http_code}" -u "$BB_AUTH" "https://api.bitbucket.org/2.0/user")
+          HTTP_CODE=$(curl -s -o /tmp/bb_test.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" "https://api.bitbucket.org/2.0/user")
           echo "API test status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
             echo "API auth failed. Response:"
@@ -37,7 +37,7 @@ jobs:
           > /tmp/all_repos.txt
           PAGE=1
           while true; do
-            HTTP_CODE=$(curl -s -o /tmp/bb_page.json -w "%{http_code}" -u "$BB_AUTH" \
+            HTTP_CODE=$(curl -s -o /tmp/bb_page.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" \
               "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
             if [ "$HTTP_CODE" != "200" ]; then
               echo "Repo list page $PAGE failed with HTTP $HTTP_CODE"
@@ -69,7 +69,7 @@ jobs:
             PAGE=1
             FOUND=0
             while true; do
-              HTTP_CODE=$(curl -s -o /tmp/bb_commits.json -w "%{http_code}" -u "$BB_AUTH" \
+              HTTP_CODE=$(curl -s -o /tmp/bb_commits.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" \
                 "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null)
               [ "$HTTP_CODE" != "200" ] && break
 
