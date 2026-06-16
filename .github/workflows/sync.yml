@@ -1,4 +1,4 @@
-name: Sync Bitbucket Contributions
+name: Sync Contributions
 
 on:
   schedule:
@@ -21,31 +21,31 @@ jobs:
           git log --format='%aI' | sort -u > /tmp/existing_dates.txt
           echo "Existing commits: $(wc -l < /tmp/existing_dates.txt)"
 
-      - name: Fetch Bitbucket commits
+      - name: Fetch commits
         env:
           BB_AUTH_B64: ${{ secrets.BB_AUTH_B64 }}
+          BB_WORKSPACE: ${{ secrets.BB_WORKSPACE }}
+          BB_AUTHOR_MATCH: ${{ secrets.BB_AUTHOR_MATCH }}
         run: |
           set +e
 
-          # Debug: test API connectivity
           HTTP_CODE=$(curl -s -o /tmp/bb_test.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" "https://api.bitbucket.org/2.0/user")
           echo "API test status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "API auth failed. Response:"
-            cat /tmp/bb_test.json
+            echo "API auth failed."
             exit 1
           fi
 
-          # Get all repo slugs
+          # Build author match pattern for python
+          IFS='|' read -ra AUTHORS <<< "$BB_AUTHOR_MATCH"
+          AUTHOR_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${AUTHORS[@]}")
+
           > /tmp/all_repos.txt
           PAGE=1
           while true; do
             HTTP_CODE=$(curl -s -o /tmp/bb_page.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" \
-              "https://api.bitbucket.org/2.0/repositories/britive?pagelen=100&page=$PAGE")
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "Repo list page $PAGE failed with HTTP $HTTP_CODE"
-              break
-            fi
+              "https://api.bitbucket.org/2.0/repositories/$BB_WORKSPACE?pagelen=100&page=$PAGE")
+            [ "$HTTP_CODE" != "200" ] && break
             python3 -c "
           import json
           with open('/tmp/bb_page.json') as f:
@@ -62,9 +62,8 @@ jobs:
             [ "$HAS_NEXT" != "yes" ] && break
             PAGE=$((PAGE + 1))
           done
-          echo "Found $(wc -l < /tmp/all_repos.txt) repos across $PAGE pages"
+          echo "Found $(wc -l < /tmp/all_repos.txt) repos"
 
-          # Scan each repo for Samuel Wan commits
           > /tmp/bb_dates.txt
           REPO_NUM=0
           while IFS= read -r REPO; do
@@ -73,11 +72,12 @@ jobs:
             FOUND=0
             while true; do
               HTTP_CODE=$(curl -s -o /tmp/bb_commits.json -w "%{http_code}" -H "Authorization: Basic $BB_AUTH_B64" \
-                "https://api.bitbucket.org/2.0/repositories/britive/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null)
+                "https://api.bitbucket.org/2.0/repositories/$BB_WORKSPACE/$REPO/commits?pagelen=100&page=$PAGE" 2>/dev/null)
               [ "$HTTP_CODE" != "200" ] && break
 
               PARSED=$(python3 -c "
-          import json
+          import json, sys
+          authors = $AUTHOR_JSON
           try:
               with open('/tmp/bb_commits.json') as f:
                   data = json.loads(f.read(), strict=False)
@@ -88,7 +88,7 @@ jobs:
                   has_next = 'yes' if data.get('next') else 'no'
                   for c in vals:
                       raw = c.get('author', {}).get('raw', '')
-                      if 'Samuel Wan' in raw or 'sam.wan' in raw:
+                      if any(a in raw for a in authors):
                           print(c['date'])
                   print('NEXT:' + has_next)
           except:
@@ -113,7 +113,7 @@ jobs:
             [ $FOUND -gt 0 ] && echo "$REPO: $FOUND commits"
             [ $((REPO_NUM % 50)) -eq 0 ] && echo "Progress: $REPO_NUM repos scanned..."
           done < /tmp/all_repos.txt
-          echo "Total Bitbucket commits: $(wc -l < /tmp/bb_dates.txt)"
+          echo "Total commits: $(wc -l < /tmp/bb_dates.txt)"
 
       - name: Create new commits
         run: |
@@ -121,16 +121,13 @@ jobs:
           git config user.name "Turtdle"
           git config user.email "47124703+Turtdle@users.noreply.github.com"
 
-          NEW_COUNT=0
           sort -u /tmp/bb_dates.txt | while IFS= read -r DATE; do
             [ -z "$DATE" ] && continue
             if ! grep -qF "$DATE" /tmp/existing_dates.txt 2>/dev/null; then
               GIT_AUTHOR_DATE="$DATE" GIT_COMMITTER_DATE="$DATE" \
                 git commit --allow-empty -m "work" --quiet
-              NEW_COUNT=$((NEW_COUNT + 1))
             fi
           done
-          echo "New commits added: $NEW_COUNT"
 
       - name: Push
         run: |
