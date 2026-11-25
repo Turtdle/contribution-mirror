@@ -110,7 +110,13 @@ jobs:
               [ "$HAS_NEXT" != "yes" ] && break
               PAGE=$((PAGE + 1))
             done
-            [ $FOUND -gt 0 ] && echo "$REPO: $FOUND commits"
+            if [ $FOUND -gt 0 ]; then
+              # Action logs are public on a public repo, so never print the repo name.
+              # Print a keyed hash instead: the same repo gets the same id every run,
+              # but it can't be turned back into a name without the BB_AUTH_B64 secret.
+              REPO_ID=$(printf '%s' "$REPO" | openssl dgst -sha256 -hmac "$BB_AUTH_B64" | awk '{print $NF}' | cut -c1-10)
+              echo "repo-$REPO_ID: $FOUND commits"
+            fi
             [ $((REPO_NUM % 50)) -eq 0 ] && echo "Progress: $REPO_NUM repos scanned..."
           done < /tmp/all_repos.txt
           echo "Total commits: $(wc -l < /tmp/bb_dates.txt)"

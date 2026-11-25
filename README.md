@@ -52,7 +52,7 @@ GitHub sees commits on the default branch from a verified email and counts them 
 ## FAQ
 
 **Will this expose my company's code or repo names?**
-No. The workflow runs inside GitHub Actions. Repo names appear only in the action logs, which are private to your fork. The commits themselves are empty with a generic message.
+No. Action logs on a public repo are readable by anyone, so the workflow never prints repo names. Each repo is logged as a keyed hash (`repo-1a2b3c4d5e: 12 commits`) that stays the same between runs but can't be turned back into a name without your `BB_AUTH_B64` secret. The commits themselves are empty with a generic message.
 
 **How long does the daily sync take?**
 Depends on how many repos are in your workspace. ~15-20 minutes for ~300 repos.
